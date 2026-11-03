@@ -38,7 +38,7 @@ pipeline {
           sh '''
             set +x
             export SONAR_TOKEN="$SONAR_AUTH_TOKEN"
-            mvn -B -ntp sonar:sonar -Dsonar.host.url="$SONAR_HOST_URL"
+            mvn -B -ntp sonar:sonar -Dsonar.host.url="$SONAR_HOST_URL" -Dsonar.qualitygate.wait=true -Dsonar.qualitygate.timeout=600
           '''
         }
       }
