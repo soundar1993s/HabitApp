@@ -1,0 +1,9 @@
+target/
+.env
+.env.*
+!.env.example
+.secrets/
+reports/
+.idea/
+.vscode/
+*.log

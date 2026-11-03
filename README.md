@@ -1,5 +1,9 @@
 # Habit Tracker
 
+CI and deployment configuration for Project 05 is provided in `Jenkinsfile`, `Dockerfile`, `helm/habitapp`, `argocd` and `k8s`. Follow [the deployment and evidence runbook](docs/DEPLOYMENT.md) for Jenkins credentials, GitOps setup, rollout, rollback and submission checks. Jenkins publishes images and commits chart values; Argo CD performs deployment.
+
+The chart uses multiple replicas to demonstrate workload availability. This upstream in-memory application does not share data between replicas and loses data when a process restarts. No live Kubernetes deployment is claimed until verified with the runbook.
+
 A self-contained Spring Boot REST API + dashboard for tracking daily/weekly habits and streaks.
 **No external database** — all data is held in memory (`ConcurrentHashMap`) for the life of the process.
 
