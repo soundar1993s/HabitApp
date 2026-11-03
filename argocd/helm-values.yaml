@@ -1,5 +1,9 @@
 # Argo CD chart 10.11.6 / application v3.5.6. Dashboard stays private.
 createClusterRoles: false
+# CRDs were bootstrapped from this pinned chart and retained separately.
+# Excluding them from the release also bounds Helm storage payload size.
+crds:
+  install: false
 dex:
   enabled: false
 notifications:

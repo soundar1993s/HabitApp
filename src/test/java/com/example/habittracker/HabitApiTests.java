@@ -51,4 +51,10 @@ class HabitApiTests {
     @Test void missingHabitReturns404() throws Exception {
         mvc.perform(get("/api/habits/999999")).andExpect(status().isNotFound());
     }
+    @Test void rejectsUntrustedCrossOriginPreflight() throws Exception {
+        mvc.perform(options("/api/habits")
+                .header("Origin", "https://untrusted.example")
+                .header("Access-Control-Request-Method", "POST"))
+                .andExpect(status().isForbidden());
+    }
 }
