@@ -1,7 +1,7 @@
 replicaCount: 2
 image:
   repository: 985344363717.dkr.ecr.ap-south-1.amazonaws.com/habitapp
-  tag: "3-4c661acb54c0"
+  tag: "4-2da366c2e6ad"
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 service:
