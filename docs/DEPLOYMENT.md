@@ -1,67 +1,57 @@
-# HabitApp CI and GitOps deployment
+# HabitApp deployment runbook
 
-## Current scope
+## CI prerequisites
 
-The supplied Spring Boot Java 21 application is an in-memory demonstration. Each replica keeps its own data; data is lost on restart and is not shared between replicas. Do not present it as a persistent, multi-user production service. The deployment demonstrates the requested CI and GitOps workflow. Public exposure should be limited to demonstration data because the upstream API has no authentication.
+Use the dedicated `habitapp-linux` inbound agent. Build its image with `docker build -f ci/agent/Dockerfile -t habitapp-jenkins-agent:aws .`. The image adds Maven 3.9.16 and Helm 3.19.0 to the existing AWS-capable Java 21 agent. Ensure its Maven cache is owned by UID/GID 1000.
 
-The original Spring Boot 3.3.4 framework version is retained. Dependency maintenance and a vulnerability review remain necessary before production use.
+Configure a Pipeline from SCM using the user-owned repository, branch `*/main`, script `Jenkinsfile`. Configure the Git PathRestriction extension to include application source, pom.xml, Dockerfile, Jenkinsfile and ci files, and exclude `helm/habitapp/values.yaml`. The pipeline enables `H/5 * * * *` polling.
 
-## CI setup
+Store the three credential IDs listed in README in Jenkins. The CI IAM identity needs only authorization-token and image-push/read operations for the HabitApp ECR repository. It has no EKS permissions. The SSH deploy key must have repository write permission and be usable non-interactively; GitHub host keys are pinned in `ci/github_known_hosts`.
 
-1. Build the extended agent: `docker build -f ci/agent/Dockerfile -t habitapp-jenkins-agent:local .`. It extends the existing BlogReact agent and adds Maven and Helm. Use this image when recreating the existing inbound build-agent container with its existing environment file, network, socket group and volumes. Never display its secret.
-2. Push this source to your own GitHub HabitApp repository. The Argo CD manifests currently expect `https://github.com/soundar1993s/HabitApp.git`, branch `main`.
-3. In SonarQube create project key `habit-tracker`. Generate a project analysis token; store it as Jenkins Secret text `habitapp-sonar-token`. Configure the signed project webhook to `http://blogapp-jenkins:8080/sonarqube-webhook/`, using the same signing secret selected on Jenkins' `sonarqube-server` configuration. Never publish the token or secret.
-4. Store Docker Hub username and access token in Jenkins Username with password credential `habitapp-registry`. Store GitHub username and a repository-scoped write token as `habitapp-git`. Grant only the required repository content write permission.
-5. Create a Pipeline from SCM, your HabitApp Git URL, branch `*/main`, script `Jenkinsfile`. Set `IMAGE_REPOSITORY` to your actual Docker Hub namespace/habitapp. The namespace must exist and the credential must allow pushes.
-6. Build manually first. Capture Maven test output, Sonar quality gate, pipeline success and registry image tag. The pipeline does not run kubectl or Helm install.
-7. For automatic builds, configure Jenkins Git plugin's 'Polling ignores commits from certain users' extension to ignore `jenkins@localhost`, then enable Poll SCM `H/5 * * * *`, or configure an authenticated GitHub webhook reachable from GitHub. Do not poll without excluding the CI deployment commits; they would repeatedly trigger new builds. `[skip ci]` alone is not a Jenkins trigger filter.
+SonarQube project key is `habit-tracker`. The Maven scanner waits for the quality result; the following Jenkins Quality Gate stage validates the completed analysis before publication. The 30-day project-scoped analysis token is stored as `habitapp-sonar-token`.
 
-## Kubernetes and Argo CD
+## Administrative Kubernetes bootstrap
 
-Use an existing supported Kubernetes cluster and install a pinned, reviewed Argo CD release using the official installation documentation. Keep Argo CD's dashboard private; use port forwarding for screenshots. Do not create the application before the first real image tag has been committed to the chart.
+The demonstration reuses cluster blogapp-eks in ap-south-1. Argo CD is v3.5.6 from official chart 10.11.6. Its control plane was bootstrapped with chart-rendered manifests after Helm release-metadata writes timed out. CRDs were installed separately and retained. The application itself is deployed by Argo CD's Helm renderer; no separate Helm release owns the same resources.
 
-An administrator bootstraps these resources once:
+`ci/bootstrap-argocd.ps1` records the administrative bootstrap procedure. It is not called by Jenkins. The AppProject restricts the Git source and destination namespace. `k8s/argocd-rbac.yaml` allows the controller to read resources in habitapp and write only the required workload kinds there.
+
+After Jenkins publishes the first real image and commits its tag:
 
 ```sh
-kubectl apply -f k8s/namespace.yaml
 kubectl apply -f argocd/project.yaml
 kubectl apply -f argocd/application.yaml
+kubectl get application habitapp -n argocd
 ```
 
-The AppProject permits only this repository, the habitapp namespace, and the chart's resource kinds. The workload ServiceAccount has no API token or Kubernetes privileges. The chart supports an optional existing Secret without storing its values in Git. No secret is needed by this upstream in-memory application.
+Argo CD renders the chart and synchronizes the Deployment, Service, ConfigMap, ServiceAccount, PDB and Ingress. EKS nodes pull from ECR with their existing node role. Secret values are not needed by this in-memory application; the chart supports an optional externally created Secret reference.
 
-The default Service is a LoadBalancer. On a local cluster use `--set service.type=ClusterIP` and port forwarding; that is local evidence, not a public URL. On EKS ensure the appropriate load-balancer controller or supported service integration is installed and the external address is reachable. For Ingress, install a matching ingress controller and configure DNS/TLS separately.
+## Private dashboards
 
-Argo CD renders the Helm chart and manages the resources; it does not create a Helm release. For a separate direct-Helm demonstration, use a temporary namespace, then remove that release before handing the same namespace/resources to Argo CD. Do not make Helm and Argo CD concurrently manage the same release.
+```sh
+kubectl port-forward -n argocd svc/argocd-server 8082:80 --address localhost
+kubectl port-forward -n monitoring svc/monitoring-grafana 3003:80 --address localhost
+```
 
-## Deployment and rollback evidence
+The Argo CD dashboard uses HTTP only through a private ClusterIP and local forward. On this connection the default WebSocket forward stalled; the supported `KUBECTL_PORT_FORWARD_WEBSOCKETS=false` transport restored access. Do not expose these dashboard ports publicly.
 
-1. Confirm Argo CD shows Synced and Healthy and Kubernetes shows two Ready replicas.
-2. Start an external HTTP probe against the application during the update; save response codes and timestamps. Endpoint checks prove HTTP availability, not in-memory data continuity.
-3. Make an application change, push it, run Jenkins and verify a new immutable image tag is committed under `helm/habitapp/values.yaml`.
-4. Show Argo CD detecting the Git commit and synchronizing. Save old/new image references, rollout status, pod ages and endpoint results.
-5. To roll back, revert the deployment-tag commit in Git and push the revert. Argo CD restores the previous image. Do not use `kubectl rollout undo` while Argo CD self-healing is enabled; Git would overwrite it.
-6. Record recovery with Argo CD Synced/Healthy, ready replicas and successful endpoint probes.
+The public application ingress uses HTTP, ALB health checks, session affinity and a 30-second drain delay. The namespace enables ALB pod readiness-gate injection. Runtime roots are read-only, UID/GID is 10001, capabilities are dropped and privilege escalation is disabled.
+
+## Update and rollback
+
+Push an application source change. Jenkins publishes `<build-number>-<12-character-commit>` and commits the new Helm image values. Argo CD detects and deploys that Git commit automatically. Inspect the public `/actuator/info`, workload image and Argo revision to correlate the release.
+
+For a failed configuration rollout, revert its Git commit and push the revert. Keep automated sync enabled; do not use kubectl rollout undo against Argo-owned resources. The verified exercise committed an unavailable image, observed ImagePullBackOff while two old replicas served requests, and reverted the commit to restore release 4.
 
 ## Monitoring and logs
+
+Apply the dashboard ConfigMap in monitoring with label `grafana_dashboard=1`, using `monitoring/habitapp.json`. Prometheus supplies pod CPU, memory, state and restart metrics. Argo CD supplies sync and application health.
 
 ```sh
 kubectl get pods -n habitapp -o wide
 kubectl top pods -n habitapp
-kubectl logs -n habitapp -l app.kubernetes.io/name=habitapp --tail=80 --prefix
+kubectl logs -n habitapp deployment/habitapp --tail=80
 kubectl get events -n habitapp --sort-by=.metadata.creationTimestamp
-kubectl get application habitapp -n argocd
 ```
 
-`kubectl top` requires metrics-server. Capture pod restarts and resource usage plus Argo CD health. Keep passwords, repository tokens and Secret contents out of screenshots.
-
-## Submission checklist
-
-- Your GitHub repository with Java source, tests, pom.xml, Dockerfile, Jenkinsfile, Helm chart, Argo CD manifests and this runbook.
-- Actual Maven/Jenkins success, Sonar analysis and quality gate screenshots.
-- Versioned image available in the registry and the same tag in the Git chart and running pods.
-- Argo CD Synced/Healthy screenshots and automatic update/rollback evidence.
-- Pod status, CPU/memory and application log screenshots.
-- A reachable application URL. A localhost address is only usable on this computer.
-
-Prepared configuration is not evidence of a completed deployment. Record only checks actually executed.
+`docs/check-endpoint.ps1` records individual timestamped HTTP/readiness observations. Saved logs and screenshots are in the separate Project-Evidence/HabitApp folder. Do not include credential files or Secret contents in submission evidence.

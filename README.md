@@ -1,110 +1,56 @@
-# Habit Tracker
+# HabitApp Java CI and GitOps on EKS
 
-CI and deployment configuration for Project 05 is provided in `Jenkinsfile`, `Dockerfile`, `helm/habitapp`, `argocd` and `k8s`. Follow [the deployment and evidence runbook](docs/DEPLOYMENT.md) for Jenkins credentials, GitOps setup, rollout, rollback and submission checks. Jenkins publishes images and commits chart values; Argo CD performs deployment.
+Java 21 / Spring Boot Habit Tracker with Maven tests, Jenkins CI, SonarQube, Amazon ECR, Helm and Argo CD deployment.
 
-The chart uses multiple replicas to demonstrate workload availability. This upstream in-memory application does not share data between replicas and loses data when a process restarts. No live Kubernetes deployment is claimed until verified with the runbook.
+- Application: http://k8s-habitapp-habitapp-1e4c46765c-1708282587.ap-south-1.elb.amazonaws.com
+- Source: https://github.com/soundar1993s/HabitApp
+- Upstream application: https://github.com/Vennilavanguvi/HabitApp
+- Verified release: `4-2da366c2e6ad`, Jenkins `HabitApp-GitOps-CI` build 4.
 
-A self-contained Spring Boot REST API + dashboard for tracking daily/weekly habits and streaks.
-**No external database** — all data is held in memory (`ConcurrentHashMap`) for the life of the process.
+## Delivery workflow
 
-## Tech stack
-- Java 21 (or higher — LTS)
-- Spring Boot 3.3.4 (`spring-boot-starter-web`, `spring-boot-starter-validation`)
-- Maven (packaged as an executable jar)
-- Vanilla HTML/CSS/JS dashboard (served as a static resource, no frontend build step)
+GitHub main → Jenkins → Maven compile/test/package → SonarQube Quality Gate → Docker → ECR → update Helm values and push Git → Argo CD → EKS.
 
-## Requirements
-- **JDK 21+** installed and set as `JAVA_HOME` (verify with `java -version`)
-- Maven 3.6+ (verify with `mvn -version`)
+Jenkins has no Kubernetes deployment credentials and does not run kubectl or Helm install. Argo CD monitors `helm/habitapp` on main with automated sync, pruning and self-healing. Source changes trigger Jenkins through five-minute SCM polling; values-only deployment commits are excluded from polling to prevent build loops.
 
-## Build
+## Verified results
 
-```bash
-mvn clean package
+Seven tests passed. SonarQube reports Quality Gate Passed, 82.5% coverage, zero open security/reliability/maintainability issues and 0.0% duplication. The wildcard CORS setting was removed and a rejection test added.
+
+The versioned ECR image runs as UID 10001. EKS has two Ready application replicas with probes, resource limits, rolling updates and ALB readiness gates. Argo CD reached Synced/Healthy. A missing-image rollout was observed, then a Git revert restored the working image. Timestamped endpoint checks returned HTTP 200 and readiness UP before, during and after the exercise; these are observations, not continuous availability measurements.
+
+## Build and validate
+
+```sh
+mvn -B -ntp clean verify
+docker build -t habitapp:local .
+docker run --rm --memory 512m --read-only --tmpfs /tmp:rw,nosuid,size=128m --cap-drop ALL --security-opt no-new-privileges -p 127.0.0.1:8081:8080 habitapp:local
+helm lint helm/habitapp
+helm template habitapp helm/habitapp
 ```
 
-This produces `target/habit-tracker.jar`.
+The application listens on container port 8080. Health endpoints are `/actuator/health/liveness` and `/actuator/health/readiness`; `/actuator/info` exposes the deployed image version. Open `http://localhost:8081` for the local container.
 
-## Run
+## Repository guide
 
-```bash
-java -jar target/habit-tracker.jar
-```
+| Path | Purpose |
+|---|---|
+| src/, pom.xml | Java application, seven tests and JaCoCo |
+| Dockerfile, .dockerignore | Multi-stage non-root runtime |
+| Jenkinsfile, ci/ | Maven CI, registry publication and GitOps update |
+| helm/habitapp/ | Configurable Deployment, Service, ConfigMap, PDB and ALB ingress |
+| argocd/ | Restricted AppProject, Application and pinned controller configuration |
+| k8s/ | Namespace and Argo CD RBAC bootstrap |
+| monitoring/habitapp.json | CPU, memory, pod state and restart dashboard |
+| infra/ci-ecr-policy.json | Repository-scoped CI AWS permissions |
+| docs/ | Deployment runbook and verified outcomes |
 
-Then open **http://localhost:8080** in your browser for the dashboard, or call the API directly.
+## Credentials and scope
 
-## REST API
+Jenkins credentials: `habitapp-sonar-token` (project analysis only, 30 days), `habitapp-aws-ci` (this ECR repository only) and `habitapp-git` (this GitHub repository's SSH deploy key). No values are committed. Argo CD can write the permitted resource kinds only in namespace habitapp; it cannot modify BlogReact or create cluster roles. Workload service-account tokens are disabled.
 
-| Method | Endpoint                        | Description                          |
-|--------|----------------------------------|---------------------------------------|
-| GET    | `/api/habits`                    | List all habits                      |
-| GET    | `/api/habits/{id}`               | Get a single habit                   |
-| POST   | `/api/habits`                    | Create a habit                       |
-| PUT    | `/api/habits/{id}`               | Update a habit's name/description    |
-| DELETE | `/api/habits/{id}`               | Delete a habit                       |
-| PATCH  | `/api/habits/{id}/active`        | Activate/deactivate a habit          |
-| POST   | `/api/habits/{id}/complete`      | Mark habit complete for today (or `?date=YYYY-MM-DD`) |
-| DELETE | `/api/habits/{id}/complete`      | Unmark completion for a date         |
-| GET    | `/api/habits/{id}/stats`         | Streaks + last-7-day completion rate |
+## Demonstration limits
 
-### Example: create a habit
+The supplied application stores data in memory per replica, has no authentication and loses data on restart. ALB session affinity supports a browser session but does not replicate data or provide database persistence. Use synthetic data only. The public demonstration is HTTP. The supplied Spring Boot 3.3.4 dependency baseline still requires maintenance before production use.
 
-```bash
-curl -X POST http://localhost:8080/api/habits \
-  -H "Content-Type: application/json" \
-  -d '{"name":"Drink water","description":"8 glasses a day","frequency":"DAILY"}'
-```
-
-### Example: mark it done today
-
-```bash
-curl -X POST http://localhost:8080/api/habits/1/complete
-```
-
-## SonarQube code scan
-
-### Requirements
-- A running SonarQube server (Community Edition is fine) — locally via Docker is easiest, or use SonarCloud
-- Java 21+ (same JDK used to build the project)
-- Maven 3.6+
-- A Sonar authentication token (generate from the SonarQube UI: **My Account → Security → Generate Token**)
-- Network access from your machine to the SonarQube server (default port `9000`)
-
-### 1. Start a local SonarQube server (skip if you already have one, or are using SonarCloud)
-```bash
-docker run -d --name sonarqube -p 9000:9000 sonarqube:community
-```
-Wait ~1 minute, then open http://localhost:9000 (default login `admin` / `admin`, it'll prompt you to change the password). Generate a token as noted above.
-
-### 2. Run the scan via Maven (recommended — no separate scanner install needed)
-```bash
-mvn clean verify sonar:sonar \
-  -Dsonar.host.url=http://localhost:9000 \
-  -Dsonar.token=YOUR_GENERATED_TOKEN
-```
-- `clean verify` compiles, runs tests, and generates the JaCoCo coverage report the `pom.xml` is already configured to produce.
-- `sonar:sonar` (from the `sonar-maven-plugin` already added to `pom.xml`) runs the actual analysis and uploads results to the server.
-
-### 3. Alternative: standalone `sonar-scanner` CLI
-If you'd rather not use the Maven plugin, install the [SonarScanner CLI](https://docs.sonarsource.com/sonarqube/latest/analyzing-source-code/scanners/sonarscanner/), then from the project root:
-```bash
-mvn clean verify        # still needed, to produce target/classes + jacoco.xml
-sonar-scanner -Dsonar.token=YOUR_GENERATED_TOKEN
-```
-This picks up settings from `sonar-project.properties`, already included in the project.
-
-### 4. Using SonarCloud instead of a local server
-Replace `-Dsonar.host.url` with SonarCloud's URL and add your organization key:
-```bash
-mvn clean verify sonar:sonar \
-  -Dsonar.host.url=https://sonarcloud.io \
-  -Dsonar.organization=YOUR_ORG_KEY \
-  -Dsonar.token=YOUR_SONARCLOUD_TOKEN
-```
-
-### Where results show up
-After the scan finishes, open the SonarQube/SonarCloud dashboard for project key `habit-tracker` to see bugs, code smells, vulnerabilities, and test coverage (from JaCoCo).
-
-## Notes
-- Streaks (`currentStreak`, `longestStreak`) are recalculated automatically whenever a habit is marked/unmarked complete.
-- Because storage is in-memory, restarting the app clears all data. Swapping in a real database later just means replacing `HabitRepository` with a Spring Data JPA repository — the service/controller layers don't need to change.
+See [deployment](docs/DEPLOYMENT.md) and [validation](docs/VALIDATION.md) for execution details. Local Jenkins, SonarQube and private dashboard forwards must be running for their respective tools; AWS resources remain billable while retained.
