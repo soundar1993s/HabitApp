@@ -4,7 +4,7 @@ metadata:
   name: argocd-habitapp
   namespace: habitapp
 rules:
-  - apiGroups: ["", apps, policy, networking.k8s.io, autoscaling]
+  - apiGroups: ["*"]
     resources: ["*"]
     verbs: [get, list, watch]
   - apiGroups: [""]

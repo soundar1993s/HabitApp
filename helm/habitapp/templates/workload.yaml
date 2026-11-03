@@ -9,6 +9,7 @@ kind: ConfigMap
 metadata:
   name: {{ .Release.Name }}-config
 data:
+  APP_VERSION: {{ .Values.image.tag | quote }}
 {{ toYaml .Values.config | indent 2 }}
 ---
 apiVersion: apps/v1
